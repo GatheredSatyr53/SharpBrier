@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="SharpBrier.SampleProject/SharpBrier.SampleProject.csproj" />
+  <Project Path="SharpBrier.Tests/SharpBrier.Tests.csproj" />
+  <Project Path="SharpBrier/SharpBrier.csproj" />
+</Solution>
