@@ -273,9 +273,91 @@ namespace SharpBrier.Tests
         }
 
         [Fact]
-        public void RejectsInterfaces()
+        public void ImplementsInterfaceMethodsAndProperties()
         {
-            Assert.Throws<NotSupportedException>(() => Anonym<IDisposable>.Build([], _ => { }));
+            int calls = 0;
+            IGreeter greeter = Anonym<IGreeter>.Build([], b => b
+                .HasReturn<string>(nameof(IGreeter.Greet), [typeof(string)], (_, a) => { calls++; return "hi " + a[0]; })
+                .HasReturn<int>("get_Calls", [], (_, _) => calls));
+
+            Assert.Equal("hi Bob", greeter.Greet("Bob"));
+            Assert.Equal(1, greeter.Calls);
+            Assert.Equal(typeof(object), greeter.GetType().BaseType);
+        }
+
+        [Fact]
+        public void ImplementsMethodsOfInheritedInterfaces()
+        {
+            ILoudGreeter greeter = Anonym<ILoudGreeter>.Build([], b => b
+                .HasReturn<string>(nameof(IGreeter.Greet), [typeof(string)], (_, a) => "hi " + a[0])
+                .HasReturn<string>(nameof(ILoudGreeter.Shout), [typeof(string)], (@this, a) => @this.Greet((string)a[0]).ToUpperInvariant())
+                .HasReturn<int>("get_Calls", [], (_, _) => 0));
+
+            Assert.Equal("HI BOB", greeter.Shout("Bob"));
+            Assert.IsAssignableFrom<IGreeter>(greeter);
+        }
+
+        [Fact]
+        public void MissingInterfaceMembersThrowNotImplementedWhenCalled()
+        {
+            IGreeter greeter = Anonym<IGreeter>.Build([], b => b
+                .HasReturn<string>(nameof(IGreeter.Greet), [typeof(string)], (_, _) => ""));
+
+            Assert.Throws<NotImplementedException>(() => greeter.Calls);
+        }
+
+        [Fact]
+        public void DefaultInterfaceMethodIsKeptUnlessOverridden()
+        {
+            IWithDefault kept = Anonym<IWithDefault>.Build([], b => b
+                .HasReturn<string>("get_Name", [], (_, _) => "x"));
+            IWithDefault replaced = Anonym<IWithDefault>.Build([], b => b
+                .HasReturn<string>("get_Name", [], (_, _) => "x")
+                .HasReturn<string>(nameof(IWithDefault.Describe), [], (_, _) => "custom"));
+
+            Assert.Equal("default x", kept.Describe());
+            Assert.Equal("custom", replaced.Describe());
+        }
+
+        [Fact]
+        public void KeepsSameNamedMethodsOfDifferentInterfacesApart()
+        {
+            IBoth both = Anonym<IBoth>.Build([], b => b
+                .HasReturn<string>($"{nameof(IFirst)}.{nameof(IFirst.Who)}", [], (_, _) => "first")
+                .HasReturn<string>($"{nameof(ISecond)}.{nameof(ISecond.Who)}", [], (_, _) => "second"));
+
+            Assert.Equal("first", ((IFirst)both).Who());
+            Assert.Equal("second", ((ISecond)both).Who());
+        }
+
+        [Fact]
+        public void UnqualifiedNameOfSameNamedMethodsResolvesToFirstInterfaceAndRejectsDuplicate()
+        {
+            Assert.Throws<InvalidOperationException>(() => Anonym<IBoth>.Build([], b => b
+                .HasReturn<string>(nameof(IFirst.Who), [], (_, _) => "first")
+                .HasReturn<string>(nameof(ISecond.Who), [], (_, _) => "second")));
+        }
+
+        [Fact]
+        public void RejectsQualifiedNameWithUnknownInterface()
+        {
+            Assert.Throws<MissingMethodException>(() => Anonym<IBoth>.Build([], b => b
+                .HasReturn<string>("IThird.Who", [], (_, _) => "")));
+        }
+
+        [Fact]
+        public void ImplementsInternalInterface()
+        {
+            IInternal instance = Anonym<IInternal>.Build([], b => b
+                .HasReturn<string>(nameof(IInternal.Secret), [], (_, _) => "shh"));
+
+            Assert.Equal("shh", instance.Secret());
+        }
+
+        [Fact]
+        public void RejectsConstructorArgumentsForInterface()
+        {
+            Assert.Throws<ArgumentException>(() => Anonym<IGreeter>.Build([1], _ => { }));
         }
     }
 }

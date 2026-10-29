@@ -57,4 +57,40 @@ namespace SharpBrier.Tests
 
         public abstract string Pick(string value);
     }
+
+    public interface IGreeter
+    {
+        string Greet(string name);
+
+        int Calls { get; }
+    }
+
+    public interface ILoudGreeter : IGreeter
+    {
+        string Shout(string name);
+    }
+
+    public interface IWithDefault
+    {
+        string Name { get; }
+
+        string Describe() => "default " + Name;
+    }
+
+    public interface IFirst
+    {
+        string Who();
+    }
+
+    public interface ISecond
+    {
+        string Who();
+    }
+
+    public interface IBoth : IFirst, ISecond { }
+
+    internal interface IInternal
+    {
+        string Secret();
+    }
 }

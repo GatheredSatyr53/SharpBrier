@@ -8,6 +8,8 @@ namespace SharpBrier
     /// <summary>
     /// Builds instances of anonymous subclasses of <typeparamref name="TClass"/> at runtime,
     /// overriding virtual and abstract methods with delegates (an analogue of Java anonymous classes).
+    /// <typeparamref name="TClass"/> may be a class or an interface; for an interface the anonymous type
+    /// derives from <see cref="object"/> and implements the interface together with everything it inherits.
     /// </summary>
     public static class Anonym<TClass> where TClass : class
     {
@@ -39,12 +41,22 @@ namespace SharpBrier
             ArgumentNullException.ThrowIfNull(buildAction);
 
             Type baseType = typeof(TClass);
-            if (baseType.IsInterface)
-                throw new NotSupportedException($"{baseType} is an interface; only classes are supported.");
             if (baseType.IsSealed)
                 throw new InvalidOperationException($"{baseType} is sealed and cannot be subclassed.");
             if (baseType.IsGenericTypeDefinition)
                 throw new InvalidOperationException($"{baseType} is an open generic type.");
+            if (baseType.IsInterface)
+            {
+                if (constructorArguments.Length > 0)
+                    throw new ArgumentException(
+                        $"{baseType} is an interface; constructor arguments must be empty.", nameof(constructorArguments));
+                MethodInfo? staticAbstract = InterfaceHierarchy(baseType)
+                    .SelectMany(i => i.GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic))
+                    .FirstOrDefault(m => m.IsAbstract);
+                if (staticAbstract is not null)
+                    throw new NotSupportedException(
+                        $"{baseType} declares static abstract member {Describe(staticAbstract)}; static abstract members are not supported.");
+            }
 
             OverridingBuilder builder = new();
             buildAction(builder);
@@ -150,7 +162,13 @@ namespace SharpBrier
             TypeBuilder typeBuilder = Module.DefineType(
                 $"{baseType.Name}<Anonym>{site}#{Interlocked.Increment(ref _typeCounter)}",
                 TypeAttributes.Public | TypeAttributes.Class | TypeAttributes.Sealed,
-                baseType);
+                baseType.IsInterface ? typeof(object) : baseType);
+
+            if (baseType.IsInterface)
+            {
+                foreach (Type implemented in InterfaceHierarchy(baseType))
+                    typeBuilder.AddInterfaceImplementation(implemented);
+            }
 
             FieldBuilder bodiesField = typeBuilder.DefineField(
                 BodiesFieldName, typeof(Delegate[]), FieldAttributes.Private | FieldAttributes.InitOnly);
@@ -164,7 +182,7 @@ namespace SharpBrier
                 EmitOverride(typeBuilder, bodiesField, i, shape.Overrides[i]);
             }
 
-            foreach (MethodInfo abstractMethod in baseType.GetMethods(InstanceMembers))
+            foreach (MethodInfo abstractMethod in OverridableMethods(baseType))
             {
                 if (abstractMethod.IsAbstract && !overridden.Contains(abstractMethod))
                     EmitAbstractStub(typeBuilder, abstractMethod);
@@ -243,11 +261,30 @@ namespace SharpBrier
             ArgumentNullException.ThrowIfNull(arguments);
 
             Type baseType = typeof(TClass);
-            MethodInfo? method = baseType.GetMethod(name, InstanceMembers, binder: null, arguments, modifiers: null);
+            IEnumerable<Type> searchedTypes = baseType.IsInterface ? InterfaceHierarchy(baseType) : [baseType];
+
+            // "IFoo.Bar" or "My.Namespace.IFoo.Bar" picks the method of one specific interface in the hierarchy.
+            int lastDot = name.LastIndexOf('.');
+            if (lastDot > 0)
+            {
+                string typeName = name[..lastDot];
+                name = name[(lastDot + 1)..];
+                searchedTypes = searchedTypes.Where(t => t.Name == typeName || t.FullName == typeName).ToArray();
+                if (!searchedTypes.Any())
+                    throw new MissingMethodException($"{baseType} does not declare or inherit a type named {typeName}.");
+            }
+
+            MethodInfo? method = null;
+            foreach (Type searched in searchedTypes)
+            {
+                method = searched.GetMethod(name, InstanceMembers, binder: null, arguments, modifiers: null);
+                if (method is not null)
+                    break;
+            }
             if (method is null)
             {
                 string signature = $"{name}({string.Join(", ", arguments.Select(t => t.Name))})";
-                MethodInfo? genericCandidate = baseType.GetMethods(InstanceMembers)
+                MethodInfo? genericCandidate = OverridableMethods(baseType)
                     .FirstOrDefault(m => m.Name == name && m.IsGenericMethodDefinition && m.GetParameters().Length == arguments.Length);
                 if (genericCandidate is not null)
                     throw new NotSupportedException($"Method {Describe(genericCandidate)} is generic; generic methods are not supported.");
@@ -264,8 +301,21 @@ namespace SharpBrier
             return method;
         }
 
+        /// <summary>The interface itself followed by every interface it inherits.</summary>
+        private static IEnumerable<Type> InterfaceHierarchy(Type interfaceType) =>
+            interfaceType.GetInterfaces().Prepend(interfaceType);
+
+        /// <summary>Instance methods that an anonymous subclass may override or must implement.</summary>
+        private static IEnumerable<MethodInfo> OverridableMethods(Type baseType) =>
+            baseType.IsInterface
+                ? InterfaceHierarchy(baseType).SelectMany(i => i.GetMethods(InstanceMembers))
+                : baseType.GetMethods(InstanceMembers);
+
         private static ConstructorInfo FindConstructor(Type baseType, object[] arguments)
         {
+            if (baseType.IsInterface)
+                return typeof(object).GetConstructor(Type.EmptyTypes)!;
+
             List<ConstructorInfo> candidates = baseType.GetConstructors(InstanceMembers)
                 .Where(c => !c.IsPrivate && MatchesArguments(c.GetParameters(), arguments))
                 .ToList();
@@ -328,12 +378,25 @@ namespace SharpBrier
 
         private static MethodBuilder DefineOverridingMethod(TypeBuilder typeBuilder, MethodInfo baseMethod)
         {
-            MethodAttributes attributes = baseMethod.Attributes;
-            attributes &= ~(MethodAttributes.Abstract | MethodAttributes.VtableLayoutMask);
-            attributes |= MethodAttributes.Virtual | MethodAttributes.HideBySig | MethodAttributes.ReuseSlot;
+            string name;
+            MethodAttributes attributes;
+            if (baseMethod.DeclaringType!.IsInterface)
+            {
+                // Explicit interface implementation: keeps same-named methods of different interfaces apart.
+                name = $"{baseMethod.DeclaringType.FullName}.{baseMethod.Name}";
+                attributes = MethodAttributes.Private | MethodAttributes.Virtual | MethodAttributes.Final
+                    | MethodAttributes.HideBySig | MethodAttributes.NewSlot;
+            }
+            else
+            {
+                name = baseMethod.Name;
+                attributes = baseMethod.Attributes;
+                attributes &= ~(MethodAttributes.Abstract | MethodAttributes.VtableLayoutMask);
+                attributes |= MethodAttributes.Virtual | MethodAttributes.HideBySig | MethodAttributes.ReuseSlot;
+            }
 
             Type[] parameterTypes = baseMethod.GetParameters().Select(p => p.ParameterType).ToArray();
-            MethodBuilder method = typeBuilder.DefineMethod(baseMethod.Name, attributes, baseMethod.ReturnType, parameterTypes);
+            MethodBuilder method = typeBuilder.DefineMethod(name, attributes, baseMethod.ReturnType, parameterTypes);
             typeBuilder.DefineMethodOverride(method, baseMethod);
             return method;
         }
